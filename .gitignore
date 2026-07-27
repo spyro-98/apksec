@@ -1,0 +1,12 @@
+.claude/
+
+# Scan output (may contain real findings/secrets from scanned APKs)
+secscan-*.html
+secscan-*.csv
+secscan-*.json
+secscan-*.xml
+secscan-*/
+
+# jadx work directories kept with --keep
+secscan.*/
+*.apk
