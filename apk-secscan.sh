@@ -893,22 +893,12 @@ if want("html"):
         '<label class="ty" data-cat="'+esc(c)+'"><input type="checkbox" class="fcat" value="'+esc(c)+'" checked>'
         '<span>'+esc(c)+'</span><span class="ycnt">'+str(ccounts[c])+'</span></label>' for c in cat_list)
 
-    def badge(s): return '<span class="bdg" style="--c:'+SEVC.get(s,"#5cd2e6")+'">'+esc(s)+'</span>'
-
-    trs=[]
-    for r in rows:
-        ty=r["type"]; tc="ty-find" if ty=="FINDING" else ("ty-rev" if ty=="REVIEW" else "ty-info")
-        m=esc(r["match"]); fi=esc(r["file"]); ti=esc(r["title"]); rc=SEVC.get(r["severity"],"#5cd2e6")
-        trs.append('<tr data-sev="'+r["severity"]+'" data-typ="'+ty+'" data-cat="'+esc(r["category"])+'" '
-                   'data-sevrank="'+str(SEV_RANK.get(r["severity"],9))+'" data-file="'+fi+'" style="--rc:'+rc+'">'
-                   '<td class="c-sev">'+badge(r["severity"])+'</td>'
-                   '<td class="c-cat">'+esc(r["category"])+'</td>'
-                   '<td class="c-typ '+tc+'">'+esc(ty)+'</td>'
-                   '<td class="c-ttl" title="'+ti+'">'+ti+'</td>'
-                   '<td class="mono c-file" title="'+fi+'">'+fi+'</td>'
-                   '<td class="mono c-line">'+esc(r["line"])+'</td>'
-                   '<td class="mono c-match" title="'+m+'">'+m+'</td>'
-                   '<td class="c-sp"></td></tr>')
+    # Rows are shipped as compact JSON (not pre-rendered HTML): with deep scans
+    # (10k+ rows) building one <tr> per row server-side produces a multi-MB DOM
+    # that the browser struggles to lay out. The client renders only the rows
+    # currently visible in the viewport (see the "virtual scroll" JS below).
+    rows_data=[[r["severity"],r["category"],r["type"],r["title"],r["file"],r["line"],r["match"]] for r in rows]
+    rows_json=json.dumps(rows_data,ensure_ascii=False).replace("</","<\\/")
 
     meta_html=('PKG <b>'+esc(pkg or "n/a")+'</b><i>//</i>SCOPE <b>'+esc(scope)+'</b><i>//</i>'
                'FILES <b>'+esc(str(nfiles))+'</b><i>//</i>'+esc(meta["generated"]))
@@ -1039,6 +1029,8 @@ if want("html"):
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
  tbody td.c-sev{border-left:3px solid var(--rc)}
  tbody tr{cursor:pointer}
+ tbody tr.vsp{cursor:default}
+ tbody tr.vsp td{background:transparent!important;border:none!important;padding:0!important}
  tbody tr:nth-child(even) td{background:rgba(92,210,230,.022)}
  tbody tr:hover td{background:rgba(92,210,230,.06)}
  tbody tr.sel td{background:rgba(255,157,51,.09)}
@@ -1160,7 +1152,7 @@ if want("html"):
   <thead><tr>
    <th data-k="sev">Sev<i class="sa"></i></th><th data-k="cat">Category<i class="sa"></i></th><th data-k="typ">Type<i class="sa"></i></th><th data-k="ttl">Title<i class="sa"></i></th><th data-k="file">File<i class="sa"></i></th><th data-k="line">Line<i class="sa"></i></th><th data-k="match">Match<i class="sa"></i></th><th class="sp"></th>
   </tr></thead>
-  <tbody id="tb">@@ROWS@@</tbody>
+  <tbody id="tb"></tbody>
  </table>
 </div>
 <div id="empty">no rows match the current filters</div>
@@ -1193,29 +1185,83 @@ if want("html"):
 </div>
 <div id="toast"></div>
 <script id="embed" type="application/json">@@EMBED@@</script>
+<script id="rowsdata" type="application/json">@@ROWSJSON@@</script>
 <script>
  const EMBED=JSON.parse(document.getElementById('embed').textContent||'{}');
- const rows=[...document.querySelectorAll('#tb tr')];
+ // DATA: one array per row, column order = [sev,cat,typ,title,file,line,match]
+ // (matches the <thead> columns 1:1). Kept as arrays, not objects, so a 10k+
+ // row report stays a few hundred KB of JSON instead of megabytes of markup.
+ const DATA=JSON.parse(document.getElementById('rowsdata').textContent||'[]');
+ let filtered=DATA.slice(), comparator=null;
+ const SEVC={CRITICAL:'#ff4d33',HIGH:'#ff8f2e',MEDIUM:'#f0b54a',LOW:'#bf9352',INFO:'#4fc2d4'};
+ const SEV_RANK={CRITICAL:0,HIGH:1,MEDIUM:2,LOW:3,INFO:4};
  const tbl=document.getElementById('tbl'),wrap=document.querySelector('.tablewrap');
+ const tb=document.getElementById('tb');
  const q=document.getElementById('q'),shown=document.getElementById('shown'),empty=document.getElementById('empty');
  const SEGS=[...document.querySelectorAll('.spectrum .sg')];
  const sevSel=()=>new Set([...document.querySelectorAll('.fsev:checked')].map(c=>c.value));
  const typSel=()=>new Set([...document.querySelectorAll('.ftyp:checked')].map(c=>c.value));
  const catSel=()=>new Set([...document.querySelectorAll('.fcat:checked')].map(c=>c.value));
 
+ // ---------- virtual scroll: only the rows visible in the viewport are ever
+ // real DOM nodes (a fixed row height + top/bottom spacer <tr>s), so table
+ // size no longer depends on how many findings the scan produced. ----------
+ let selIdx=-1, renderedStart=-1, renderedEnd=-1, ROWH=33, rowHMeasured=false, wrapMode=false;
+ const BUFFER=8;
+ function tcClass(t){return t==='FINDING'?'ty-find':(t==='REVIEW'?'ty-rev':'ty-info');}
+ function badge(s){return '<span class="bdg" style="--c:'+(SEVC[s]||'#5cd2e6')+'">'+esc(s)+'</span>';}
+ function rowHtml(r,idx){
+  const sev=r[0],cat=esc(r[1]),typ=r[2],ttl=esc(r[3]),file=esc(r[4]),line=esc(r[5]),match=esc(r[6]);
+  const rc=SEVC[sev]||'#5cd2e6';
+  return '<tr data-i="'+idx+'"'+(idx===selIdx?' class="sel"':'')+' style="--rc:'+rc+'">'
+   +'<td class="c-sev">'+badge(sev)+'</td>'
+   +'<td class="c-cat">'+cat+'</td>'
+   +'<td class="c-typ '+tcClass(typ)+'">'+esc(typ)+'</td>'
+   +'<td class="c-ttl" title="'+ttl+'">'+ttl+'</td>'
+   +'<td class="mono c-file" title="'+file+'">'+file+'</td>'
+   +'<td class="mono c-line">'+line+'</td>'
+   +'<td class="mono c-match" title="'+match+'">'+match+'</td>'
+   +'<td class="c-sp"></td></tr>';
+ }
+ function renderAll(){
+  let html=''; for(let i=0;i<filtered.length;i++) html+=rowHtml(filtered[i],i);
+  tb.innerHTML=html;
+ }
+ function renderWindow(force){
+  if(wrapMode){renderAll();return;}
+  const total=filtered.length;
+  const scrollTop=wrap.scrollTop, viewH=wrap.clientHeight||600;
+  const start=Math.max(0,Math.floor(scrollTop/ROWH)-BUFFER);
+  const end=Math.min(total,Math.ceil((scrollTop+viewH)/ROWH)+BUFFER);
+  if(!force && start===renderedStart && end===renderedEnd) return;
+  renderedStart=start; renderedEnd=end;
+  const topH=start*ROWH, botH=Math.max(0,(total-end)*ROWH);
+  let html='<tr class="vsp" style="height:'+topH+'px"><td colspan="8" style="height:'+topH+'px"></td></tr>';
+  for(let i=start;i<end;i++) html+=rowHtml(filtered[i],i);
+  html+='<tr class="vsp" style="height:'+botH+'px"><td colspan="8" style="height:'+botH+'px"></td></tr>';
+  tb.innerHTML=html;
+  if(!rowHMeasured){
+   const tr=tb.querySelector('tr[data-i]');
+   if(tr){const h=tr.getBoundingClientRect().height;
+    if(h>0){rowHMeasured=true; if(Math.abs(h-ROWH)>0.5){ROWH=h;renderedStart=-1;renderedEnd=-1;renderWindow(true);}}}
+  }
+ }
+ let scTick=false;
+ wrap.addEventListener('scroll',()=>{if(wrapMode||scTick)return;scTick=true;
+  requestAnimationFrame(()=>{scTick=false;renderWindow();});});
+
  function apply(){
   const S=sevSel(),T=typSel(),C=catSel(),Q=q.value.toLowerCase();
-  let n=0; const vis={CRITICAL:0,HIGH:0,MEDIUM:0,LOW:0,INFO:0};
-  for(const tr of rows){
-   const ok=S.has(tr.dataset.sev)&&T.has(tr.dataset.typ)&&C.has(tr.dataset.cat)
-    &&(Q===''||tr.textContent.toLowerCase().includes(Q));
-   tr.style.display=ok?'':'none';
-   if(ok){n++;vis[tr.dataset.sev]++;}
-  }
-  shown.innerHTML='<b>'+n+'</b> / '+rows.length+' rows';
+  filtered=DATA.filter(r=>S.has(r[0])&&T.has(r[2])&&C.has(r[1])
+   &&(Q===''||(r[0]+r[1]+r[2]+r[3]+r[4]+r[5]+r[6]).toLowerCase().includes(Q)));
+  if(comparator) filtered.sort(comparator);
+  const n=filtered.length; const vis={CRITICAL:0,HIGH:0,MEDIUM:0,LOW:0,INFO:0};
+  for(const r of filtered) vis[r[0]]=(vis[r[0]]||0)+1;
+  shown.innerHTML='<b>'+n+'</b> / '+DATA.length+' rows';
   empty.style.display=n?'none':'block';
   const tot=n||1;
   for(const sg of SEGS){const c=vis[sg.dataset.sev]||0;sg.style.width=(c*100/tot)+'%';sg.style.opacity=c?'1':'0';}
+  selIdx=-1; renderedStart=-1; renderedEnd=-1; wrap.scrollTop=0; renderWindow(true);
  }
  document.querySelectorAll('.fsev,.ftyp,.fcat').forEach(c=>c.addEventListener('change',apply));
  q.addEventListener('input',apply);
@@ -1225,10 +1271,13 @@ if want("html"):
   if(e.key==='/'&&document.activeElement!==q&&document.activeElement!==ps){e.preventDefault();q.focus();}
  });
 
- // wrap toggle
+ // wrap toggle (word-wrap mode renders every filtered row at once: rows no
+ // longer have a uniform height, so the virtual-scroll math is disabled)
  const wrapBtn=document.getElementById('wrapBtn');
- wrapBtn.addEventListener('click',()=>{const on=tbl.classList.toggle('wrap');
-  wrapBtn.classList.toggle('on',on);wrapBtn.textContent='Wrap '+(on?'on':'off');layout();});
+ wrapBtn.addEventListener('click',()=>{wrapMode=tbl.classList.toggle('wrap');
+  wrapBtn.classList.toggle('on',wrapMode);wrapBtn.textContent='Wrap '+(wrapMode?'on':'off');
+  if(wrapMode&&filtered.length>2000) toast('wrap on '+filtered.length+' rows — this may be slow');
+  layout();renderedStart=-1;renderedEnd=-1;renderWindow(true);});
 
  // ---------- deterministic column resize (data cols + flexible spacer) ----------
  const cols=[...tbl.querySelectorAll('colgroup col')];   // 7 data + 1 spacer
@@ -1243,12 +1292,18 @@ if want("html"):
   cols[NCOL].style.width=slack+'px';
   tbl.style.width=(sum+slack)+'px';
  }
+ let _measureCanvas=null;
  function autofit(i){
-  const prev=cols[i].style.width; cols[i].style.width='1600px';
-  let mx=ths[i]?ths[i].scrollWidth:MIN[i];
-  for(const tr of rows){if(tr.style.display==='none')continue;const c=tr.children[i];if(c&&c.scrollWidth>mx)mx=c.scrollWidth;}
-  cols[i].style.width=prev;
-  return Math.min(Math.max(mx+20,MIN[i]),760);
+  // Rows beyond the viewport aren't real DOM nodes (virtual scroll), so width
+  // is estimated with canvas text measurement over the filtered data instead
+  // of scanning <td> elements.
+  const sample=tb.querySelector('td.mono')||tb.querySelector('td');
+  const font=sample?getComputedStyle(sample).font:getComputedStyle(tbl).font;
+  if(!_measureCanvas) _measureCanvas=document.createElement('canvas');
+  const ctx=_measureCanvas.getContext('2d'); ctx.font=font;
+  let mx=ctx.measureText(ths[i].textContent).width;
+  for(const r of filtered){const w=ctx.measureText(String(r[i])).width;if(w>mx)mx=w;}
+  return Math.min(Math.max(Math.ceil(mx)+20,MIN[i]),760);
  }
  ths.slice(0,NCOL).forEach((th,i)=>{
   const g=document.createElement('div'); g.className='grip'; th.appendChild(g);
@@ -1262,50 +1317,45 @@ if want("html"):
   g.addEventListener('dblclick',e=>{W[i]=autofit(i);layout();e.preventDefault();e.stopPropagation();});
   g.addEventListener('click',e=>e.stopPropagation());
  });
- let rT; window.addEventListener('resize',()=>{clearTimeout(rT);rT=setTimeout(layout,80);});
+ let rT; window.addEventListener('resize',()=>{clearTimeout(rT);
+  rT=setTimeout(()=>{layout();renderedStart=-1;renderedEnd=-1;renderWindow(true);},80);});
  layout(); apply();
 
- // ---------- click-to-sort columns ----------
+ // ---------- click-to-sort columns (sorts the data array, not DOM nodes) ----------
  const sortState={col:-1,dir:1};
  function sortBy(i){
   if(sortState.col===i) sortState.dir*=-1; else{sortState.col=i;sortState.dir=1;}
-  const dir=sortState.dir;
-  const key=tr=> i===0 ? parseInt(tr.dataset.sevrank,10) : tr.children[i].textContent.trim();
-  const arr=rows.slice().sort((a,b)=>{
-   const av=key(a),bv=key(b);
-   if(typeof av==='number'&&typeof bv==='number') return (av-bv)*dir;
+  const dir=sortState.dir, col=i;
+  comparator=(a,b)=>{
+   if(col===0) return (SEV_RANK[a[0]]-SEV_RANK[b[0]])*dir;
+   const av=a[col],bv=b[col];
    const an=parseFloat(av),bn=parseFloat(bv);
    if(!isNaN(an)&&!isNaN(bn)&&String(av).trim()!=='-'&&String(bv).trim()!=='-') return (an-bn)*dir;
    return String(av).localeCompare(String(bv))*dir;
-  });
-  const tb=document.getElementById('tb');
-  for(const tr of arr) tb.appendChild(tr);
+  };
+  filtered.sort(comparator);
   ths.slice(0,NCOL).forEach((th,idx)=>{
    th.classList.toggle('sorted',idx===i);
    const sa=th.querySelector('.sa'); if(sa) sa.textContent=idx===i?(dir>0?'▲':'▼'):'';
   });
+  renderedStart=-1;renderedEnd=-1; wrap.scrollTop=0; renderWindow(true);
  }
  ths.slice(0,NCOL).forEach((th,i)=>{
   th.addEventListener('click',e=>{ if(e.target.closest('.grip')) return; sortBy(i); });
  });
 
- // ---------- export currently-visible rows as CSV ----------
+ // ---------- export currently-visible (filtered) rows as CSV ----------
  document.getElementById('expBtn').addEventListener('click',()=>{
   const csvEsc=s=>{ s=String(s); return /[",\r\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
   const head=['severity','category','type','title','file','line','match'];
+  if(!filtered.length){toast('nothing to export');return;}
   const lines=[head.join(',')];
-  let n=0;
-  for(const tr of rows){
-   if(tr.style.display==='none') continue;
-   const cells=[...tr.children].slice(0,7).map(td=>csvEsc(td.getAttribute('title')??td.textContent.trim()));
-   lines.push(cells.join(',')); n++;
-  }
-  if(!n){toast('nothing to export');return;}
+  for(const r of filtered) lines.push(r.map(csvEsc).join(','));
   const blob=new Blob([lines.join('\r\n')],{type:'text/csv;charset=utf-8'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download='secscan-filtered.csv'; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-  toast(n+' rows exported');
+  toast(filtered.length+' rows exported');
  });
 
  // ---------- preview drawer + lightweight syntax highlight ----------
@@ -1391,8 +1441,9 @@ if want("html"):
  function markActive(){hits.forEach(h=>h.classList.remove('active'));
   if(hidx>=0&&hits[hidx]){hits[hidx].classList.add('active');hits[hidx].scrollIntoView({block:'center',inline:'nearest'});pCnt.textContent=(hidx+1)+'/'+hits.length;}}
  function step(d){if(!hits.length)return;hidx=(hidx+d+hits.length)%hits.length;markActive();}
- function openPreview(path,tr){
-  rows.forEach(t=>t.classList.remove('sel'));if(tr)tr.classList.add('sel');
+ function openPreview(idx){
+  selIdx=idx; renderedStart=-1;renderedEnd=-1; renderWindow(true);
+  const path=filtered[idx][4];
   pvPath=path;drfn.textContent=path;ps.value='';
   const e=EMBED[path];
   if(e&&e.c!==undefined){pvRaw=e.c;pvLang=langOf(path);
@@ -1400,11 +1451,12 @@ if want("html"):
   else{pvRaw='// preview unavailable: '+(e?({binary:'binary file',missing:'file not found',budget:'beyond embedding budget'}[e.skip]||e.skip):'not embedded')+'\n// path: '+path;pvLang='generic';drsub.textContent='';}
   renderPreview();ov.style.display='block';dr.classList.add('open');
  }
- function closePreview(){dr.classList.remove('open');ov.style.display='none';rows.forEach(t=>t.classList.remove('sel'));}
- rows.forEach(tr=>{
-  tr.addEventListener('click',()=>openPreview(tr.dataset.file,tr));
-  tr.addEventListener('dblclick',()=>copy(tr.dataset.file));
- });
+ function closePreview(){dr.classList.remove('open');ov.style.display='none';
+  selIdx=-1;renderedStart=-1;renderedEnd=-1;renderWindow(true);}
+ tb.addEventListener('click',e=>{const tr=e.target.closest('tr[data-i]');if(!tr)return;
+  openPreview(parseInt(tr.dataset.i,10));});
+ tb.addEventListener('dblclick',e=>{const tr=e.target.closest('tr[data-i]');if(!tr)return;
+  copy(filtered[parseInt(tr.dataset.i,10)][4]);});
  ov.addEventListener('click',closePreview);
  document.getElementById('drx').addEventListener('click',closePreview);
  document.addEventListener('keydown',e=>{if(e.key==='Escape')closePreview();});
@@ -1442,7 +1494,7 @@ if want("html"):
     import re as _re
     _SUB={"@@APK@@":esc(apk),"@@META@@":meta_html,"@@BASELINE@@":esc(baseline),
           "@@SEVCHK@@":sev_chk,"@@TYPCHK@@":typ_chk,"@@CATCHK@@":cat_chk,"@@SPECTRUM@@":spectrum,
-          "@@ROWS@@":"".join(trs),"@@EMBED@@":embed_json}
+          "@@ROWSJSON@@":rows_json,"@@EMBED@@":embed_json}
     doc=_re.sub(r"@@[A-Z]+@@",lambda m:_SUB.get(m.group(0),m.group(0)),TEMPLATE)
     with open(p,"w",encoding="utf-8") as fh: fh.write(doc)
     print("HTML :",p)

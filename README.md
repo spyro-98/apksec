@@ -1,152 +1,155 @@
 # apk-secscan
 
-Tool a riga di comando (un unico script bash) per la **revisione di sicurezza statica di APK Android**. Decompila l'APK, cerca pattern di rischio nel codice/risorse e produce un report navigabile con i risultati classificati per severità.
+Command-line tool (a single bash script) for **static security review of Android APKs**. It decompiles the APK, searches for risk patterns in the code/resources, and produces a navigable report with results classified by severity.
 
-Pipeline: **jadx** (decompilazione) → **ripgrep/grep** (pattern statici) → **apksigner / aapt2 / strings** (controlli opzionali sul binario) → report in **CSV / JSON / XML / HTML**.
+Pipeline: **jadx** (decompilation) → **ripgrep/grep** (static patterns) → **apksigner / aapt2 / strings** (optional binary-level checks) → report in **CSV / JSON / XML / HTML**.
 
-## Filosofia
+## Philosophy
 
-Ogni risultato è etichettato con un `type` per separare tre livelli di certezza, ed evitare di trattare un "odore" di sicurezza come se fosse una prova:
+Every result is tagged with a `type` to separate three levels of certainty, so a security "smell" is never treated as if it were proof:
 
-| Type | Significato |
+| Type | Meaning |
 |---|---|
-| `FINDING` | evidenza confermata (es. una chiave privata hardcoded, `debuggable=true`) |
-| `REVIEW`  | superficie da verificare a runtime (es. un flag di cleartext traffic, un componente esportato) |
-| `INFO`    | identificatore pubblico, non una vulnerabilità (es. una Google API key pubblica, un DSN Sentry) |
+| `FINDING` | confirmed evidence (e.g. a hardcoded private key, `debuggable=true`) |
+| `REVIEW`  | surface to verify at runtime (e.g. a cleartext traffic flag, an exported component) |
+| `INFO`    | public identifier, not a vulnerability (e.g. a public Google API key, a Sentry DSN) |
 
-Ogni riga ha anche una `severity` (`CRITICAL` / `HIGH` / `MEDIUM` / `LOW` / `INFO`) e una `category` (`Secrets`, `Network`, `WebView`, `Storage`, `Crypto`, `Manifest`, `Dependency`, `Assets`, ecc.).
+Every row also has a `severity` (`CRITICAL` / `HIGH` / `MEDIUM` / `LOW` / `INFO`) and a `category` (`Secrets`, `Network`, `WebView`, `Storage`, `Crypto`, `Manifest`, `Dependency`, `Assets`, etc.).
 
-## Requisiti
+## Requirements
 
-Obbligatori:
+Required:
 
-- **bash** (macOS/Linux; lo script evita array associativi per restare portabile su bash datato)
-- **jadx** — decompilatore APK (non serve se usi `--skip-decompile`)
-- **python3** — genera i report, la fase CVE e l'analisi degli assets
-- **grep con supporto PCRE (`-P`)** — su macOS il grep di sistema è BSD e non lo supporta: serve il GNU grep di Homebrew (binario `ggrep`)
+- **bash** (macOS/Linux; the script avoids associative arrays to stay portable on older bash)
+- **jadx** — APK decompiler (not needed if you use `--skip-decompile`)
+- **python3** — generates the reports, the CVE phase and the assets analysis
+- **grep with PCRE support (`-P`)** — on macOS the system grep is BSD and doesn't support it: you need Homebrew's GNU grep (`ggrep` binary)
 - **xargs**
 
-Opzionali:
+Optional:
 
-- **ripgrep (`rg`)** — motore di ricerca più veloce; se assente si usa il grep PCRE trovato sopra
-- **apksigner** — verifica gli schemi di firma (rileva Janus, CVE‑2017‑13156)
-- **aapt / aapt2** — estrae package name e `targetSdkVersion`
-- **unzip** e **strings** — richiesti solo con `--native`, per estrarre ed ispezionare `lib/*.so` e `assets/*`
+- **ripgrep (`rg`)** — faster search engine; falls back to the PCRE grep found above if absent
+- **apksigner** — verifies signature schemes (detects Janus, CVE‑2017‑13156)
+- **aapt / aapt2** — extracts the package name and `targetSdkVersion`
+- **unzip** and **strings** — only required with `--native`, to extract and inspect `lib/*.so` and `assets/*`
 
-Esegui `./apk-secscan.sh --deps` per una diagnosi interattiva di cosa è presente/mancante sul tuo sistema, coi comandi di installazione per macOS (brew) e Linux (apt).
+Run `./apk-secscan.sh --deps` for an interactive diagnosis of what's present/missing on your system, with install commands for macOS (brew) and Linux (apt).
 
-### Installazione rapida (macOS)
+### Quick install (macOS)
 
 ```bash
-brew install jadx ripgrep grep          # grep fornisce ggrep (GNU, supporto -P)
+brew install jadx ripgrep grep          # grep provides ggrep (GNU, -P support)
 brew install --cask android-commandlinetools
-sdkmanager "build-tools;35.0.0"         # per apksigner/aapt2
+sdkmanager "build-tools;35.0.0"         # for apksigner/aapt2
 ```
 
-### Installazione rapida (Linux/Debian)
+### Quick install (Linux/Debian)
 
 ```bash
 sudo apt install python3 xargs findutils ripgrep unzip binutils
-# jadx: scarica la release da github.com/skylot/jadx (o "apt install jadx" se disponibile)
+# jadx: download the release from github.com/skylot/jadx (or "apt install jadx" if available)
 # apksigner/aapt: Android SDK build-tools
 ```
 
-## Uso
+## Usage
 
 ```bash
-./apk-secscan.sh [opzioni] <app.apk>
+./apk-secscan.sh [options] <app.apk>
 ```
 
-Esempi:
+Examples:
 
 ```bash
-# scansione completa, tutti i formati di report
+# full scan, all report formats
 ./apk-secscan.sh app.apk
 
-# solo il codice dell'app (esclude le librerie terze parti), solo report HTML
+# only the app's own code (excludes third-party libraries), HTML report only
 ./apk-secscan.sh -s app -f html app.apk
 
-# includi anche il controllo CVE sulle dipendenze note (richiede rete) e i controlli sulle .so native
+# also check known CVEs on dependencies (needs network) and native .so checks
 ./apk-secscan.sh --cve --native app.apk
 
-# riusa una decompilazione jadx già fatta, senza rilanciare jadx
-./apk-secscan.sh --skip-decompile ./workdir-precedente app.apk
+# reuse an existing jadx decompilation, without re-running jadx
+./apk-secscan.sh --skip-decompile ./previous-workdir app.apk
 
-# uso in CI: fallisce (exit 2) se c'è almeno un FINDING >= HIGH
+# CI usage: fails (exit 2) if there is at least one FINDING >= HIGH
 ./apk-secscan.sh --fail-on high --format json -o ./out app.apk
 ```
 
-### Opzioni
+### Options
 
-| Opzione | Descrizione |
+| Option | Description |
 |---|---|
-| `-s, --scope app\|libs\|all` | ambito del codice da scansionare (default `all`). `app` = solo il package dell'app, `libs` = solo librerie terze, `all` = tutto. Manifest, risorse, firma e i controlli di assenza coprono **sempre** l'intero APK, indipendentemente dallo scope. |
-| `-f, --format csv\|json\|xml\|html\|all` | formato/i di output (default `all`) |
-| `-o, --output <dir>` | cartella di output (default `./secscan-<apk>-<timestamp>`) |
-| `-p, --app-package <pkg>` | forza il package dell'app (bypassa l'autodetect da manifest/aapt) |
-| `--native` | scansiona anche le librerie native (`.so`) con `strings`, cercando segreti embedded |
-| `--cve` | verifica le CVE note delle librerie via [OSV.dev](https://osv.dev) (richiede rete) |
-| `--cve-max <n>` | numero massimo di librerie interrogate su OSV (default 400) |
-| `--cve-mock <file>` | usa un dump OSV salvato invece della rete (uso offline/CI) — implica `--cve` |
-| `--fail-on none\|low\|medium\|high\|critical` | exit code 2 se esiste un `FINDING` ≥ soglia (per CI; default `none` → sempre exit 0) |
-| `--jadx <path>` | percorso del binario jadx |
-| `--keep` | mantiene la cartella di lavoro della decompilazione (non la cancella a fine scan) |
-| `--skip-decompile <dir>` | riusa una cartella jadx già esistente (nessuna ri-decompilazione) |
-| `--deps` | elenca i tool di sistema usati (presenti/mancanti + comando di installazione) |
-| `-h, --help` | aiuto |
+| `-s, --scope app\|libs\|all` | scope of the code to scan (default `all`). `app` = only the app's package, `libs` = only third-party libraries, `all` = everything. Manifest, resources, signature and absence checks **always** cover the whole APK, regardless of scope. |
+| `-f, --format csv\|json\|xml\|html\|all` | output format(s) (default `all`) |
+| `-o, --output <dir>` | output directory (default `./secscan-<apk>-<timestamp>`) |
+| `-p, --app-package <pkg>` | force the app's package (bypasses manifest/aapt autodetection) |
+| `--native` | also scan native libraries (`.so`) with `strings`, looking for embedded secrets |
+| `--cve` | check known library CVEs via [OSV.dev](https://osv.dev) (needs network) |
+| `--cve-max <n>` | maximum number of libraries queried on OSV (default 400) |
+| `--cve-mock <file>` | use a saved OSV dump instead of the network (offline/CI use) — implies `--cve` |
+| `--fail-on none\|low\|medium\|high\|critical` | exit code 2 if a `FINDING` >= threshold exists (for CI; default `none` → always exit 0) |
+| `--jadx <path>` | path to the jadx binary |
+| `--keep` | keep the decompilation work directory (don't delete it at the end of the scan) |
+| `--skip-decompile <dir>` | reuse an existing jadx directory (no re-decompilation) |
+| `--deps` | list the system tools used (present/missing + install command) |
+| `-h, --help` | help |
 
-## Cosa viene controllato
+## What gets checked
 
-Pattern statici su sorgenti decompilati, risorse e manifest, tra cui:
+Static patterns over decompiled sources, resources and the manifest, including:
 
-- **Secrets** — chiavi private PEM, service account Google, chiavi Stripe/AWS/Slack/GitHub/Twilio/OAuth, JWT hardcoded, password/secret hardcoded (CRITICAL)
-- **Network** — `TrustManager`/`HostnameVerifier` permissivi, endpoint in cleartext HTTP, `usesCleartextTraffic`, network security config con `cleartextTrafficPermitted` o trust-anchor utente
-- **WebView** — `addJavascriptInterface`, JavaScript abilitato, accesso universale da `file://`
-- **Manifest** — `debuggable=true`, `allowBackup=true`, componenti `exported=true`, deep link, permessi pericolosi
-- **Crypto** — AES in ECB, algoritmi deboli (DES/RC4/Blowfish), hash deboli (MD5/SHA‑1), IV statici/RNG insicuro
-- **Storage / Logging / IPC / SQL** — SharedPreferences con chiavi sensibili in chiaro, scritture su storage esterno, log potenzialmente sensibili, `PendingIntent` senza `FLAG_IMMUTABLE`, query SQL costruite per concatenazione, `grantUriPermission`
-- **Exec / DynamicCode** — `Runtime.exec`/`ProcessBuilder`, `DexClassLoader` e affini
-- **Assets/Anomaly** — materiale crittografico o keystore nei bundle, database pre-caricati, possibili leak di codice sorgente, artefatti di sviluppo (`.git/`, `.idea/`, ecc.) rimasti nel pacchetto
-- **Signing** — schema di firma v1‑only (vulnerabile a Janus, CVE‑2017‑13156), via `apksigner`
-- **Dependency** — CVE note delle librerie Maven embedded, via OSV.dev (con `--cve`)
-- **Hardening (assenza)** — certificate pinning assente, root detection assente, `AndroidKeyStore` non usato, `FLAG_SECURE` assente
+- **Secrets** — PEM private keys, Google service accounts, Stripe/AWS/Slack/GitHub/Twilio/OAuth keys, hardcoded JWTs, hardcoded passwords/secrets (CRITICAL)
+- **Network** — permissive `TrustManager`/`HostnameVerifier`, cleartext HTTP endpoints, `usesCleartextTraffic`, network security config with `cleartextTrafficPermitted` or user trust-anchors
+- **WebView** — `addJavascriptInterface`, JavaScript enabled, universal access from `file://`
+- **Manifest** — `debuggable=true`, `allowBackup=true`, `exported=true` components, deep links, dangerous permissions
+- **Crypto** — AES in ECB mode, weak algorithms (DES/RC4/Blowfish), weak hashes (MD5/SHA‑1), static IVs/insecure RNG
+- **Storage / Logging / IPC / SQL** — SharedPreferences with sensitive keys in cleartext, writes to external storage, potentially sensitive logging, `PendingIntent` without `FLAG_IMMUTABLE`, SQL queries built via concatenation, `grantUriPermission`
+- **Exec / DynamicCode** — `Runtime.exec`/`ProcessBuilder`, `DexClassLoader` and similar
+- **Assets/Anomaly** — cryptographic material or keystores in bundles, pre-loaded databases, possible source-code leaks, development artifacts (`.git/`, `.idea/`, etc.) left in the package
+- **Signing** — v1‑only signature scheme (vulnerable to Janus, CVE‑2017‑13156), via `apksigner`
+- **Dependency** — known CVEs in embedded Maven libraries, via OSV.dev (with `--cve`)
+- **Hardening (absence)** — missing certificate pinning, missing root detection, `AndroidKeyStore` not used, missing `FLAG_SECURE`
 
-Baseline di riferimento documentata nell'header dello script e nel report (AGP/Kotlin/target SDK correnti), usata solo come contesto informativo, non come regola di failing.
+Reference baseline documented in the script header and in the report (current AGP/Kotlin/target SDK), used only as informational context, not as a failing rule.
 
-## Fase CVE (`--cve`)
+## CVE phase (`--cve`)
 
-Estrae le coordinate `groupId:artifactId@version` delle librerie Maven dall'APK (file `*.version` e `pom.properties` in `META-INF/`) e le interroga in batch su `https://api.osv.dev/v1/querybatch`, poi recupera il dettaglio (ID CVE, severity, versione con fix) per ogni libreria vulnerabile.
+Extracts `groupId:artifactId@version` coordinates of Maven libraries from the APK (`*.version` files and `pom.properties` in `META-INF/`) and queries them in batch against `https://api.osv.dev/v1/querybatch`, then fetches the detail (CVE ID, severity, fixed version) for each vulnerable library.
 
-- Richiede una connessione di rete in uscita verso `api.osv.dev`. In assenza di rete la fase viene saltata con un messaggio (`CVE: cannot reach OSV.dev (...). CVE phase skipped.`) e il resto della scansione prosegue normalmente.
-- Per uso **offline o in CI air-gapped**, usa `--cve-mock <file>` con un dump JSON nel formato `{"gruppo:artefatto@versione": [<vuln OSV>, ...]}`.
-- **Nota macOS**: se il tuo `python3` viene dall'installer di python.org (non da Homebrew), le richieste HTTPS possono fallire con `CERTIFICATE_VERIFY_FAILED` finché non esegui una volta `Install Certificates.command` (si trova in `/Applications/Python 3.x/`). Lo script tenta comunque un fallback automatico usando il bundle di certificati di `certifi`, se il pacchetto è installato (`pip install certifi`).
+- Requires an outbound network connection to `api.osv.dev`. Without network, the phase is skipped with a message (`CVE: cannot reach OSV.dev (...). CVE phase skipped.`) and the rest of the scan proceeds normally.
+- For **offline or air-gapped CI use**, use `--cve-mock <file>` with a JSON dump in the format `{"group:artifact@version": [<OSV vuln>, ...]}`.
+- **macOS note**: if your `python3` comes from the python.org installer (not Homebrew), HTTPS requests can fail with `CERTIFICATE_VERIFY_FAILED` until you run `Install Certificates.command` once (found in `/Applications/Python 3.x/`). The script still attempts an automatic fallback using `certifi`'s certificate bundle, if the package is installed (`pip install certifi`).
 
-## Il report HTML
+## The HTML report
 
-Il formato `html` genera un **singolo file autonomo** (nessuna dipendenza esterna, nessuna chiamata di rete): tutto il codice sorgente delle righe con findings viene incorporato nel file stesso per la preview, entro un budget di ~6&nbsp;MB / 600 file.
+The `html` format generates a **single self-contained file** (no external dependencies, no network calls): the source code of the lines involved in findings is embedded in the file itself for the preview, within a budget of ~6&nbsp;MB / 600 files.
 
-Funzionalità:
+The table uses **virtualized ("windowed") rendering**: regardless of whether a scan produces a hundred or a hundred thousand rows, only the handful currently visible in the viewport are ever real DOM nodes — the rest exist purely as data in memory and are drawn on the fly as you scroll. This is what lets a report with tens of thousands of findings stay smooth and open instantly, instead of freezing the browser while it tries to lay out one `<tr>` per row.
 
-- filtro per **severità**, **tipo** (`FINDING`/`REVIEW`/`INFO`) e **categoria** (chip dinamiche coi conteggi, con scorciatoie "All"/"None")
-- casella di ricerca full‑text su titolo/file/match (scorciatoia da tastiera **`/`** per metterci il focus)
-- **colonne ordinabili**: click sull'intestazione per ordinare (di nuovo per invertire), con indicatore ▲/▼; la colonna Sev ordina per severità reale, non alfabeticamente
-- colonne **ridimensionabili** (trascina il bordo, doppio click per auto-fit)
-- **export CSV** delle sole righe attualmente visibili (rispetta i filtri applicati) — utile per estrarre un sottoinsieme senza rilanciare la scansione
-- click su una riga → drawer laterale con **preview del file sorgente**, syntax highlight, ricerca regex con navigazione tra i match, copia del percorso file
+Features:
 
-> **Attenzione**: il report HTML incorpora porzioni di codice sorgente reale dell'app scansionata e può contenere segreti reali nei findings `CRITICAL`. Trattalo come materiale sensibile: non committarlo in un repository pubblico e non condividerlo senza prima aver verificato/rimosso i contenuti riservati. Il `.gitignore` del progetto esclude di default i file `secscan-*` generati in locale.
+- filter by **severity**, **type** (`FINDING`/`REVIEW`/`INFO`) and **category** (dynamic chips with counts, with "All"/"None" shortcuts)
+- full‑text search box on title/file/match (keyboard shortcut **`/`** to focus it)
+- **sortable columns**: click a header to sort (click again to reverse), with a ▲/▼ indicator; the Sev column sorts by actual severity, not alphabetically
+- **resizable columns** (drag the border, double-click to auto-fit)
+- **CSV export** of only the rows currently visible (respects the active filters) — useful for extracting a subset without re-running the scan
+- click a row → side drawer with a **source file preview**, syntax highlighting, regex search with match navigation, copy file path
+- word-wrap mode (the "Wrap" button) renders every filtered row at once rather than just the visible window, since wrapped rows no longer share a uniform height — on very large result sets, filter down first for the smoothest experience
 
-## Uso in CI
+> **Warning**: the HTML report embeds portions of the scanned app's real source code and can contain real secrets in `CRITICAL` findings. Treat it as sensitive material: don't commit it to a public repository and don't share it without first reviewing/removing confidential content. The project's `.gitignore` excludes locally-generated `secscan-*` files by default.
+
+## CI usage
 
 ```bash
 ./apk-secscan.sh --fail-on high -f json -o ./out app.apk || exit 1
 ```
 
-Con `--fail-on <soglia>` lo script esce con codice **2** se esiste almeno un risultato `type=FINDING` con severità ≥ soglia; altrimenti esce con **0**. I risultati `REVIEW`/`INFO` non incidono mai sull'exit code, perché per definizione richiedono una verifica manuale.
+With `--fail-on <threshold>` the script exits with code **2** if at least one `type=FINDING` result with severity ≥ threshold exists; otherwise it exits with **0**. `REVIEW`/`INFO` results never affect the exit code, since by definition they require manual verification.
 
-## Limitazioni
+## Limitations
 
-- Analisi **statica**: non esegue l'app, non rileva comportamenti che dipendono solo da configurazione remota/runtime (i `REVIEW` esistono apposta per segnalare cosa verificare a mano).
-- Codice fortemente offuscato/minificato riduce l'efficacia dei pattern basati su nomi di classi/metodi noti.
-- I pattern regex possono generare **falsi positivi** (per questo la distinzione FINDING/REVIEW/INFO) e, in teoria, falsi negativi su varianti non coperte.
-- Non sostituisce un penetration test manuale o una code review completa: è pensato come **prima passata rapida**.
+- **Static** analysis: it doesn't run the app, and doesn't detect behavior that depends purely on remote/runtime configuration (`REVIEW` results exist precisely to flag what to verify by hand).
+- Heavily obfuscated/minified code reduces the effectiveness of patterns based on known class/method names.
+- Regex patterns can produce **false positives** (hence the FINDING/REVIEW/INFO distinction) and, in theory, false negatives on uncovered variants.
+- It doesn't replace a manual penetration test or a full code review: it's meant as a **fast first pass**.
