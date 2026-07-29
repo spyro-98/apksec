@@ -1248,6 +1248,10 @@ if want("html"):
   --sans:-apple-system,BlinkMacSystemFont,'Segoe UI Variable Text','Segoe UI','Helvetica Neue',Helvetica,Arial,sans-serif;
   --mono:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono','DejaVu Sans Mono',monospace;
   --sbw:284px;
+  /* the same wireframe polyhedron used for the brand mark, tiled extremely
+     faint across the whole page as a paper-like ambient texture — one shared
+     tile, reused everywhere so the pattern is consistent, not per-surface */
+  --radiant-tile:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 64 64'%3E%3Cpath d='M18 23L32 51M18 23L4 32M18 23L46 23M18 23L18 4M32 51L18 60M32 51L46 23M32 51L46 60M4 32L18 60M4 32L18 4M4 32L18 41M18 60L46 60M18 60L18 41M46 23L46 4M46 23L60 32M18 4L46 4M18 4L32 13M46 60L60 32M46 60L46 41M18 41L32 13M18 41L46 41M46 4L60 32M46 4L32 13M60 32L46 41M32 13L46 41' fill='none' stroke='rgba(201,165,77,0.06)' stroke-width='0.7'/%3E%3C/svg%3E");
  }
  *{box-sizing:border-box}
  html,body{margin:0;height:100%}
@@ -1271,7 +1275,7 @@ if want("html"):
 
  /* ---------- sidebar: every control lives here, narrow and scrollable ---------- */
  .sidebar{position:relative;flex:0 0 var(--sbw);width:var(--sbw);height:100%;display:flex;flex-direction:column;
-  background:var(--sbg);border-right:1px solid var(--lineS)}
+  background:var(--radiant-tile) repeat fixed,var(--sbg);border-right:1px solid var(--lineS)}
  /* resize handles: a taut tether line with a diamond anchor node at each end —
     not a plain hairline. The line lives on the element's own background so
     both ::before/::after are free for the two anchors. */
@@ -1400,7 +1404,7 @@ if want("html"):
 
  /* ---------- main: nothing but the table, full width and full height ---------- */
  .main{flex:1 1 auto;min-width:0;height:100%;display:flex;flex-direction:column;background:var(--bg)}
- .tablewrap{flex:1 1 auto;min-height:0;overflow:auto;background:var(--bg)}
+ .tablewrap{flex:1 1 auto;min-height:0;overflow:auto;background:var(--radiant-tile) repeat fixed,var(--bg)}
  /* tabular-nums + a lighter, wider-tracked header: an engraved ledger reads
     numbers in fixed-width columns and sets headings light-weight/wide-spaced
     rather than bold — bold headers read as "printed", this reads as "cut" */
@@ -1466,7 +1470,7 @@ if want("html"):
  /* ---------- preview drawer ---------- */
  #ov{position:fixed;inset:0;background:rgba(3,5,9,.6);z-index:20;display:none}
  #dr{position:fixed;top:0;right:0;height:100%;width:min(960px,96vw);min-width:340px;z-index:21;transform:translateX(101%);
-  transition:transform .22s ease-out;background:var(--bg2);
+  transition:transform .22s ease-out;background:var(--radiant-tile) repeat fixed,var(--bg2);
   border-left:1px solid var(--gold);box-shadow:-24px 0 50px -20px rgba(0,0,0,.6);display:flex;flex-direction:column}
  #dr.open{transform:none}
  /* focus frame: signals "this file is the one under analysis right now" — a
@@ -1494,7 +1498,7 @@ if want("html"):
  .dbar .cnt{color:var(--mut);min-width:52px;text-align:right;font-size:12px}
  .dbar .sep{flex:0 0 1px;align-self:stretch;background:var(--line);margin:1px 2px}
  .icobtn{font-size:17px;line-height:1;padding:6px 12px;min-width:38px;text-align:center;font-family:var(--mono)}
- .pvwrap{flex:1;overflow:auto;background:var(--bg)}
+ .pvwrap{flex:1;overflow:auto;background:var(--radiant-tile) repeat fixed,var(--bg)}
  .code{margin:0;padding:10px 0;font-size:13px;font-family:var(--mono);line-height:1.6;tab-size:4;--lnw:3ch;min-width:max-content}
  .code .cl{display:flex;align-items:flex-start}
  .code .cl:hover{background:rgba(201,165,77,.05)}
