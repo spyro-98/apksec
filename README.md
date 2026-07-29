@@ -4,6 +4,20 @@ Command-line tool (a single bash script) for **static security review of Android
 
 Pipeline: **jadx** (decompilation) → **ripgrep/grep** (static patterns) + a few **Python** passes (manifest XML parsing, asset/packer analysis, a source/sink heuristic) → optional **OSV.dev** (CVE) and **Semgrep** (custom rules) → report in **CSV / JSON / XML / SARIF / HTML**.
 
+## Quick start
+
+```bash
+./apk-secscan.sh -s app -f html --native --cve file.apk
+```
+
+This is the recommended default for a first look at an app: `-s app` scopes the scan to the app's own code (skips the noise of third-party libraries), `-f html` produces the interactive report, `--native` also inspects `lib/*.so` for embedded secrets and custom crypto, and `--cve` cross-checks every embedded library against known CVEs. Open the resulting `secscan-<apk>-<timestamp>/secscan-<apk>.html` file in any browser — no server, no build step, no network calls beyond the optional CVE lookup.
+
+Don't have the dependencies yet? See [Installation](#installation) below, or just run:
+
+```bash
+./apk-secscan.sh --deps
+```
+
 ## Philosophy
 
 Every result is tagged with a `type` to separate three levels of certainty, so a security "smell" is never treated as if it were proof:
@@ -18,25 +32,30 @@ Every row also has a `severity` (`CRITICAL` / `HIGH` / `MEDIUM` / `LOW` / `INFO`
 
 A phase that can run but found nothing (CVE, Semgrep, packer signatures, the taint heuristic) always leaves a visible `INFO` status row saying so. A report should never look identical whether a check found zero issues or silently didn't run.
 
-## Requirements
+## Installation
+
+### Requirements
 
 Required:
 
-- **bash** (macOS/Linux; the script avoids associative arrays to stay portable on older bash)
-- **jadx** — APK decompiler (not needed if you use `--skip-decompile`)
-- **python3** — generates the reports, the CVE/Semgrep phases, manifest parsing and the asset/packer/taint analysis
-- **grep with PCRE support (`-P`)** — on macOS the system grep is BSD and doesn't support it: you need Homebrew's GNU grep (`ggrep` binary)
-- **xargs**
+| Tool | Role |
+|---|---|
+| **bash** | macOS/Linux; the script avoids associative arrays to stay portable on older bash |
+| **jadx** | APK decompiler (not needed if you use `--skip-decompile`) |
+| **python3** | generates the reports, the CVE/Semgrep phases, manifest parsing and the asset/packer/taint analysis |
+| **grep with PCRE support (`-P`)** | on macOS the system grep is BSD and doesn't support it: you need Homebrew's GNU grep (`ggrep` binary) |
+| **xargs** | batch execution of the search patterns |
 
 Optional:
 
-- **ripgrep (`rg`)** — faster search engine; falls back to the PCRE grep found above if absent
-- **apksigner** — verifies signature schemes (detects Janus, CVE‑2017‑13156)
-- **aapt / aapt2** — extracts the package name and `targetSdkVersion`
-- **unzip** and **strings** — only required with `--native`, to extract and inspect `lib/*.so` and `assets/*`
-- **semgrep** — only required with `--semgrep <rules-dir>`, to run a custom static-analysis ruleset over the decompiled sources
-
-Run `./apk-secscan.sh --deps` for an interactive diagnosis of what's present/missing on your system, with install commands for macOS (brew) and Linux (apt).
+| Tool | Role | Needed for |
+|---|---|---|
+| **ripgrep (`rg`)** | faster search engine | falls back to the PCRE grep above if absent |
+| **apksigner** | verifies signature schemes (detects Janus, CVE‑2017‑13156) | signature check |
+| **aapt / aapt2** | extracts the package name and `targetSdkVersion` | manifest metadata |
+| **unzip**, **strings** | extract and inspect `lib/*.so` and `assets/*` | `--native` |
+| **semgrep** | runs a custom static-analysis ruleset over the decompiled sources | `--semgrep <rules-dir>` |
+| **certifi** (`pip install certifi`) | CA bundle fallback if `python3`'s own HTTPS trust store is broken | `--cve` on some macOS Python installs (see below) |
 
 ### Quick install (macOS)
 
@@ -56,6 +75,14 @@ sudo apt install python3 xargs findutils ripgrep unzip binutils
 pip install semgrep                     # optional, for --semgrep
 ```
 
+### Check dependency status
+
+```bash
+./apk-secscan.sh --deps
+```
+
+Prints every tool the script uses — required and optional — with a `[✓]`/`[ ]` status, the resolved path if found, what it's used for, and the exact install command for your platform (macOS/brew or Linux/apt, auto-detected). Safe to run any time, on any system: it never aborts or requires an APK, it exists specifically to answer "what do I still need to install". Run it whenever a scan complains about a missing tool, or before your first run on a new machine.
+
 ## Usage
 
 ```bash
@@ -65,14 +92,13 @@ pip install semgrep                     # optional, for --semgrep
 Examples:
 
 ```bash
-# full scan, all report formats
+# recommended default: app-only scope, HTML report, native + CVE checks
+./apk-secscan.sh -s app -f html --native --cve file.apk
+
+# full scan, every report format, every third-party library included
 ./apk-secscan.sh app.apk
 
-# only the app's own code (excludes third-party libraries), HTML report only
-./apk-secscan.sh -s app -f html app.apk
-
-# also check known CVEs on dependencies (needs network), native .so checks
-# (strings + an embedded-AES-S-box search), and a custom semgrep ruleset
+# also run a custom semgrep ruleset over the decompiled sources
 ./apk-secscan.sh --cve --native --semgrep ./my-android-rules app.apk
 
 # reuse an existing jadx decompilation, without re-running jadx
@@ -100,7 +126,7 @@ Examples:
 | `--jadx <path>` | path to the jadx binary |
 | `--keep` | keep the decompilation work directory (don't delete it at the end of the scan) |
 | `--skip-decompile <dir>` | reuse an existing jadx directory (no re-decompilation) |
-| `--deps` | list the system tools used (present/missing + install command) |
+| `--deps` | list the system tools used (present/missing + install command) — see [Check dependency status](#check-dependency-status) |
 | `-h, --help` | help |
 
 ## What gets checked

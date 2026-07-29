@@ -31,6 +31,27 @@ warn() { printf '%s[!]%s %s\n' "$c_yel" "$c_rst" "$*" >&2; }
 err()  { printf '%s[x]%s %s\n' "$c_red" "$c_rst" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
+# Ctrl-C/SIGTERM must abort immediately. Two independent problems, both
+# fixed here: (1) bash doesn't necessarily exit just because a foreground
+# child (jadx, python3, semgrep) was itself killed by the signal — a script
+# relying only on that child's exit code (e.g. "jadx && ok ... || warn ...
+# continuing") can misread an interrupted jadx as "just a harmless parse
+# warning" and silently run the rest of the pipeline on a truncated
+# decompilation. (2) jadx is a JVM: it installs its own SIGINT handler and
+# can take several seconds of CPU-bound work before it actually notices and
+# exits (observed directly: still running 2s after SIGINT, gone by ~7s) —
+# so this trap kills any child of this process outright instead of waiting
+# for it to shut down on its own.
+on_interrupt() {
+  err "Interrupted — aborting."
+  pkill -KILL -P $$ 2>/dev/null
+  if [[ -n "${WORKDIR:-}" && -z "${SKIP_DECOMPILE:-}" && "${KEEP:-0}" -eq 0 ]]; then
+    rm -rf "$WORKDIR" 2>/dev/null
+  fi
+  exit 130
+}
+trap on_interrupt INT TERM
+
 TAB=$'\t'
 # No associative arrays or ${var^^}: maximum portability (old bash / macOS).
 sev_rank() { case "$1" in
@@ -220,9 +241,18 @@ else
   [[ -n "$JADX_BIN" ]] || die "jadx not found. Install jadx, use --jadx <path> or --skip-decompile"
   WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/secscan.XXXXXX")"
   log "Decompiling with jadx -> $WORKDIR (may take a few minutes)..."
-  "$JADX_BIN" -q --threads-count 4 -d "$WORKDIR" "$APK" 2>"$WORKDIR/jadx.err" \
-    && ok "Decompilation complete" \
-    || warn "jadx reported partial errors (normal on obfuscated code) — continuing"
+  "$JADX_BIN" -q --threads-count 4 -d "$WORKDIR" "$APK" 2>"$WORKDIR/jadx.err"
+  JADX_RC=$?
+  if [[ "$JADX_RC" -eq 0 ]]; then
+    ok "Decompilation complete"
+  elif [[ "$JADX_RC" -ge 128 ]]; then
+    # killed by a signal (130=SIGINT/Ctrl-C, 143=SIGTERM, 137=SIGKILL/OOM, ...):
+    # this is an interrupted/truncated decompilation, not "jadx had a parse
+    # warning" — must not continue the rest of the pipeline on partial output.
+    die "jadx was killed (signal $((JADX_RC-128))) — aborting instead of continuing on a truncated decompilation."
+  else
+    warn "jadx reported partial errors (normal on obfuscated code) — continuing"
+  fi
 fi
 
 APK_NAME="$(basename "${APK:-$WORKDIR}")"; APK_NAME="${APK_NAME%.apk}"
