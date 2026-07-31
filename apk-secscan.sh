@@ -62,6 +62,7 @@ upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 SCOPE="all"; FORMAT="all"; OUTDIR=""; APP_PKG=""; JADX_BIN=""
 KEEP=0; SKIP_DECOMPILE=""; APK=""; NATIVE=0; FAILON="none"; CVE=0; CVE_MAX=400; CVE_MOCK=""; DEPS=0
 SEMGREP=0; SEMGREP_RULES=""
+JADX_HEAP="4g"; JADX_HEAP_SET=0
 
 # ----------------------------- parse args ------------------------------------
 usage() {
@@ -102,6 +103,9 @@ Options:
                                Exit code 2 if a FINDING >= threshold exists
                                (for CI; default: none -> exit 0)
       --jadx <path>            Path to the jadx binary
+      --jadx-heap <size>       Cap jadx's JVM heap (default: 4g). jadx's own default
+                               scales with *total system RAM* (up to 70% of it), which
+                               can starve a modest machine on a demanding APK
       --keep                   Keep the decompiled work directory
       --skip-decompile <dir>   Reuse an existing jadx directory (no re-jadx)
       --deps                   List the system tools used (present/missing + how to install)
@@ -126,6 +130,7 @@ while [[ $# -gt 0 ]]; do
     --semgrep)        SEMGREP_RULES="${2:-}"; SEMGREP=1; shift 2;;
     --fail-on)        FAILON="${2:-}"; shift 2;;
     --jadx)           JADX_BIN="${2:-}"; shift 2;;
+    --jadx-heap)      JADX_HEAP="${2:-}"; JADX_HEAP_SET=1; shift 2;;
     --keep)           KEEP=1; shift;;
     --skip-decompile) SKIP_DECOMPILE="${2:-}"; shift 2;;
     --deps|--check-deps) DEPS=1; shift;;
@@ -240,6 +245,13 @@ else
   [[ -f "$APK" ]] || die "APK not found: $APK"
   [[ -n "$JADX_BIN" ]] || die "jadx not found. Install jadx, use --jadx <path> or --skip-decompile"
   WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/secscan.XXXXXX")"
+  # jadx's own launch script defaults to "-XX:MaxRAMPercentage=70.0" — up to
+  # 70% of the *whole machine's* RAM, not a fixed amount, which can starve a
+  # modest laptop on a demanding APK. Cap it to something sane unless the
+  # caller already customized JADX_OPTS/JAVA_OPTS themselves.
+  if [[ "$JADX_HEAP_SET" -eq 1 || ( -z "${JADX_OPTS:-}" && -z "${JAVA_OPTS:-}" ) ]]; then
+    export JADX_OPTS="-Xmx${JADX_HEAP}"
+  fi
   log "Decompiling with jadx -> $WORKDIR (may take a few minutes)..."
   "$JADX_BIN" -q --threads-count 4 -d "$WORKDIR" "$APK" 2>"$WORKDIR/jadx.err"
   JADX_RC=$?

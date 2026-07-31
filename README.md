@@ -124,6 +124,7 @@ Examples:
 | `--semgrep <rules-dir>` | also run [semgrep](https://semgrep.dev) with the given ruleset over the decompiled sources (needs `semgrep` installed; you supply the ruleset, e.g. an Android-focused community ruleset) |
 | `--fail-on none\|low\|medium\|high\|critical` | exit code 2 if a `FINDING` >= threshold exists (for CI; default `none` → always exit 0) |
 | `--jadx <path>` | path to the jadx binary |
+| `--jadx-heap <size>` | cap jadx's JVM heap (default `4g`). jadx's own launch script defaults to up to 70% of the machine's *total* RAM, which can starve a modest machine on a demanding APK — see [Memory usage](#memory-usage) below |
 | `--keep` | keep the decompilation work directory (don't delete it at the end of the scan) |
 | `--skip-decompile <dir>` | reuse an existing jadx directory (no re-decompilation) |
 | `--deps` | list the system tools used (present/missing + install command) — see [Check dependency status](#check-dependency-status) |
@@ -204,6 +205,12 @@ No text in the report renders below 11px. Keyboard focus (Tab) is visible throug
 ```
 
 With `--fail-on <threshold>` the script exits with code **2** if at least one `type=FINDING` result with severity ≥ threshold exists; otherwise it exits with **0**. `REVIEW`/`INFO` results never affect the exit code, since by definition they require manual verification. Use `-f sarif` if the CI platform can ingest SARIF (e.g. GitHub code scanning).
+
+## Memory usage
+
+Almost all of the memory a scan uses is the jadx decompilation step, not this script: its own launch script sets `-XX:MaxRAMPercentage=70.0`, i.e. a JVM heap of up to **70% of the machine's total RAM** — not a fixed amount, so it scales with however much memory the machine happens to have. On a 16&nbsp;GB laptop that's ~11&nbsp;GB just for the heap, on top of the JVM's own overhead, which can crowd out everything else running at the same time on a modest machine.
+
+`apk-secscan.sh` caps this to a fixed **4&nbsp;GB by default** (`--jadx-heap <size>`, e.g. `--jadx-heap 8g` for very large/multidex APKs that need more headroom, or a smaller value on a memory-constrained machine) by exporting `JADX_OPTS="-Xmx<size>"` before invoking jadx — this only overrides jadx's own default if you haven't already set `JADX_OPTS`/`JAVA_OPTS` yourself. If a scan still needs more, `--jadx-heap 8g` (or higher) is the first thing to try before assuming something else is wrong.
 
 ## Limitations
 
