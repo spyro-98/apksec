@@ -359,10 +359,25 @@ search_list() { # rx filelist
   fi
 }
 
-scan() { # SEV CAT TYPE "Title" 'REGEX'  (uses the scoped FILELIST)
-  local sev="$1" cat="$2" typ="$3" title="$4" rx="$5"
+# Heuristic only (line-based, not a real parser): true if the matched line's
+# first non-blank token opens a comment in any language this scanner touches
+# (java/kt/js/ts/gradle "// /* *", python/shell/properties/yaml "#", xml/html "<!--").
+# Used to mute smell-level noise (a URL mentioned in a doc comment); NEVER applied
+# to Secrets/CRITICAL checks — an actual key is still a leak even commented out.
+is_comment_line() {
+  local t="$1"
+  t="${t#"${t%%[![:space:]]*}"}"
+  case "$t" in
+    '//'*|'#'*|'*'*|'/*'*|'<!--'*) return 0;;
+    *) return 1;;
+  esac
+}
+
+scan() { # SEV CAT TYPE "Title" 'REGEX' [skip_comment_lines=0|1]  (uses the scoped FILELIST)
+  local sev="$1" cat="$2" typ="$3" title="$4" rx="$5" nc="${6:-0}"
   search_list "$rx" "$FILELIST" | while IFS= read -r ln; do
     local f l m; f="${ln%%:*}"; ln="${ln#*:}"; l="${ln%%:*}"; m="${ln#*:}"
+    [[ "$nc" == "1" ]] && is_comment_line "$m" && continue
     emit_row "$sev" "$cat" "$typ" "$title" "$f" "$l" "$m"
   done
 }
@@ -486,21 +501,21 @@ scan MEDIUM "IPC" REVIEW "FileProvider / grantUriPermission (verify scope)" \
 #  LOW / INFO — smells, endpoints, public identifiers (NOT secrets)
 # =============================================================================
 scan LOW  "Network" REVIEW "Cleartext HTTP endpoint (verify if real backend)" \
-  'http://(?!schemas\.android\.com|www\.w3\.org|localhost|127\.0\.0\.1|10\.0\.2\.2)[A-Za-z0-9.-]+'
+  'http://(?!schemas\.android\.com|www\.w3\.org|localhost|127\.0\.0\.1|10\.0\.2\.2)[A-Za-z0-9.-]+' 1
 scan LOW  "Network" INFO   "localhost/emulator reference (likely debug)" \
-  'http://(?:localhost|127\.0\.0\.1|10\.0\.2\.2)'
+  'http://(?:localhost|127\.0\.0\.1|10\.0\.2\.2)' 1
 scan LOW  "Env" INFO       "References to non-production environments" \
-  '(?i)\b(?:staging|preprod|pre-prod|\.dev\b|internal\.|debug-api|test-api|sandbox)\b'
+  '(?i)\b(?:staging|preprod|pre-prod|\.dev\b|internal\.|debug-api|test-api|sandbox)\b' 1
 scan LOW  "Quality" INFO   "TODO/FIXME/HACK comments" \
   '(?i)//\s*(?:TODO|FIXME|HACK|XXX|BUG)\b'
 scan INFO "Endpoints" INFO "HTTPS / Cloud Functions endpoints" \
-  'https://[A-Za-z0-9.-]+\.(?:cloudfunctions\.net|firebaseio\.com|firebaseapp\.com|run\.app)[A-Za-z0-9/_.-]*'
+  'https://[A-Za-z0-9.-]+\.(?:cloudfunctions\.net|firebaseio\.com|firebaseapp\.com|run\.app)[A-Za-z0-9/_.-]*' 1
 scan INFO "Identifiers" INFO "Google API key (AIzaSy…) — public, verify GCP RESTRICTIONS" \
   '\bAIza[0-9A-Za-z_-]{35}\b'
 scan INFO "Identifiers" INFO "Sentry DSN — public ingest key, not a secret" \
-  'https://[0-9a-f]+@[A-Za-z0-9.-]*sentry[A-Za-z0-9.-]*/[0-9]+'
+  'https://[0-9a-f]+@[A-Za-z0-9.-]*sentry[A-Za-z0-9.-]*/[0-9]+' 1
 scan INFO "Identifiers" INFO "RemoteConfig (remotely-driven behavior)" \
-  'FirebaseRemoteConfig|getRemoteConfig|remoteConfig'
+  'FirebaseRemoteConfig|getRemoteConfig|remoteConfig' 1
 
 # =============================================================================
 #  MANIFEST + NETWORK CONFIG (always, out of scope)
